@@ -1,12 +1,9 @@
-version: '3.8'
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
 
   kafka:
     image: confluentinc/cp-kafka:7.3.0
@@ -17,13 +14,80 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.3.0
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:29092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
 
   cassandra:
     image: cassandra:4.1
     ports:
       - "9042:9042"
     environment:
-      - CASSANDRA_CLUSTER_NAME=TestCluster
-      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      CASSANDRA_CLUSTER_NAME: warehouse-cluster
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      - kafka
+    command: >
+      bash -c '
+        cub kafka-ready -b kafka:29092 1 60 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic warehouse-events --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic warehouse-events-dlq --partitions 1 --replication-factor 1
+      '
+
+  consumer:
+    image: python:3.11-slim
+    depends_on:
+      - kafka-init
+      - cassandra
+      - schema-registry
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_PORT: 9042
+      WAREHOUSE_TOPIC: warehouse-events
+      WAREHOUSE_DLQ_TOPIC: warehouse-events-dlq
+      WAREHOUSE_CONSUMER_GROUP: warehouse-state-consumer
+    command: >
+      bash -c '
+        pip install --no-cache-dir -r requirements.txt &&
+        python consumer.py
+      '
+
+  wms-producer:
+    image: python:3.11-slim
+    depends_on:
+      - kafka-init
+      - schema-registry
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      WAREHOUSE_TOPIC: warehouse-events
+    command: >
+      bash -c '
+        pip install --no-cache-dir -r requirements.txt &&
+        python wms_producer.py
+      '

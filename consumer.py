@@ -1,231 +1,523 @@
 import json
 import logging
+import os
+import time
 import uuid
-from datetime import datetime
-from confluent_kafka import Consumer, Producer
-from cassandra.cluster import Cluster
-from cassandra.query import BatchStatement, SimpleStatement
-from cassandra import ConsistencyLevel
+from datetime import UTC, datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from cassandra import ConsistencyLevel
+from cassandra.cluster import Cluster, NoHostAvailable
+from cassandra.query import BatchStatement, SimpleStatement
+from confluent_kafka import Consumer, Producer
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+class EventValidationError(Exception):
+    pass
+
+
+class UnsupportedEventError(Exception):
+    pass
+
 
 class WarehouseConsumer:
     def __init__(self):
-        self.consumer = Consumer({
-            'bootstrap.servers': 'localhost:9092',
-            'group.id': 'warehouse-state-consumer',
-            'auto.offset.reset': 'earliest',
-            'enable.auto.commit': False
-        })
-        self.consumer.subscribe(['warehouse-events'])
-        
-        self.dlq_producer = Producer({'bootstrap.servers': 'localhost:9092'})
+        kafka_bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        cassandra_hosts = os.getenv("CASSANDRA_CONTACT_POINTS", "localhost").split(",")
+        cassandra_port = int(os.getenv("CASSANDRA_PORT", "9042"))
+        self.topic = os.getenv("WAREHOUSE_TOPIC", "warehouse-events")
+        self.dlq_topic = os.getenv("WAREHOUSE_DLQ_TOPIC", "warehouse-events-dlq")
+        self.group_id = os.getenv("WAREHOUSE_CONSUMER_GROUP", "warehouse-state-consumer")
 
-        self.cluster = Cluster(['localhost'])
+        self.consumer = Consumer(
+            {
+                "bootstrap.servers": kafka_bootstrap,
+                "group.id": self.group_id,
+                "auto.offset.reset": "earliest",
+                "enable.auto.commit": False,
+            }
+        )
+        self.consumer.subscribe([self.topic])
+        self.dlq_producer = Producer({"bootstrap.servers": kafka_bootstrap})
+
+        self.cluster = self._connect_to_cassandra(cassandra_hosts, cassandra_port)
         self.session = self.cluster.connect()
         self._init_db()
 
+    def _connect_to_cassandra(self, hosts, port):
+        while True:
+            try:
+                cluster = Cluster(contact_points=hosts, port=port)
+                cluster.connect().shutdown()
+                return cluster
+            except NoHostAvailable:
+                logging.info("waiting for cassandra to become available")
+                time.sleep(5)
+
     def _init_db(self):
-        self.session.execute("""
-            CREATE KEYSPACE IF NOT EXISTS warehouse 
-            WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
-        """)
-        self.session.set_keyspace('warehouse')
-        
-        self.session.execute("""
+        self.session.execute(
+            """
+            CREATE KEYSPACE IF NOT EXISTS warehouse
+            WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
+            """
+        )
+        self.session.set_keyspace("warehouse")
+
+        self.session.execute(
+            """
             CREATE TABLE IF NOT EXISTS inventory_by_product_zone (
                 product_id uuid,
                 zone_id uuid,
                 available_quantity int,
                 reserved_quantity int,
-                last_updated_at timestamp,
+                last_event_timestamp timestamp,
                 PRIMARY KEY ((product_id, zone_id))
-            );
-        """)
-        self.session.execute("""
+            )
+            """
+        )
+        self.session.execute(
+            """
             CREATE TABLE IF NOT EXISTS inventory_by_product (
                 product_id uuid,
                 zone_id uuid,
                 available_quantity int,
                 reserved_quantity int,
-                last_updated_at timestamp,
+                last_event_timestamp timestamp,
                 PRIMARY KEY ((product_id), zone_id)
-            );
-        """)
-        self.session.execute("""
+            )
+            """
+        )
+        self.session.execute(
+            """
             CREATE TABLE IF NOT EXISTS inventory_by_zone (
                 zone_id uuid,
                 product_id uuid,
                 available_quantity int,
                 reserved_quantity int,
-                last_updated_at timestamp,
+                last_event_timestamp timestamp,
                 PRIMARY KEY ((zone_id), product_id)
-            );
-        """)
-        self.session.execute("""
+            )
+            """
+        )
+        self.session.execute(
+            """
             CREATE TABLE IF NOT EXISTS processed_events (
-                event_id uuid,
+                event_id uuid PRIMARY KEY,
                 processed_at timestamp,
-                PRIMARY KEY (event_id)
-            );
-        """)
-        self.session.execute("""
+                event_type text,
+                partition int,
+                offset bigint
+            )
+            """
+        )
+        self.session.execute(
+            """
             CREATE TABLE IF NOT EXISTS orders (
-                order_id uuid,
+                order_id uuid PRIMARY KEY,
                 status text,
-                PRIMARY KEY (order_id)
-            );
-        """)
+                last_event_timestamp timestamp
+            )
+            """
+        )
+        self.session.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_history (
+                product_id uuid,
+                event_timestamp timestamp,
+                event_id uuid,
+                event_type text,
+                payload text,
+                PRIMARY KEY ((product_id), event_timestamp, event_id)
+            ) WITH CLUSTERING ORDER BY (event_timestamp DESC, event_id ASC)
+            """
+        )
+
+    def _parse_uuid(self, value, field_name):
+        try:
+            return uuid.UUID(value)
+        except Exception as error:
+            raise EventValidationError(f"invalid {field_name}: {value}") from error
+
+    def _parse_timestamp(self, value):
+        if not value:
+            raise EventValidationError("timestamp is required")
+        normalized = value.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as error:
+            raise EventValidationError(f"invalid timestamp: {value}") from error
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+
+    def _validate_positive_quantity(self, quantity, field_name="quantity"):
+        if not isinstance(quantity, int) or quantity <= 0:
+            raise EventValidationError(f"invalid {field_name}: {quantity} (must be positive integer)")
 
     def _is_event_processed(self, event_id):
-        query = "SELECT event_id FROM processed_events WHERE event_id = %s"
-        result = self.session.execute(query, (event_id,))
-        return result.one() is not None
+        row = self.session.execute(
+            "SELECT event_id FROM processed_events WHERE event_id = %s", (event_id,)
+        ).one()
+        return row is not None
 
-    def _get_inventory(self, product_id, zone_id):
-        query = "SELECT available_quantity, reserved_quantity, last_updated_at FROM inventory_by_product_zone WHERE product_id = %s AND zone_id = %s"
-        result = self.session.execute(query, (product_id, zone_id)).one()
-        if result:
-            return result.available_quantity, result.reserved_quantity, result.last_updated_at
-        return 0, 0, None
+    def _load_inventory_state(self, product_id, zone_id):
+        row = self.session.execute(
+            """
+            SELECT available_quantity, reserved_quantity, last_event_timestamp
+            FROM inventory_by_product_zone
+            WHERE product_id = %s AND zone_id = %s
+            """,
+            (product_id, zone_id),
+        ).one()
+        if row is None:
+            return {"available_quantity": 0, "reserved_quantity": 0, "last_event_timestamp": None}
+        return {
+            "available_quantity": row.available_quantity,
+            "reserved_quantity": row.reserved_quantity,
+            "last_event_timestamp": row.last_event_timestamp,
+        }
 
-    def _add_inventory_updates_to_batch(self, batch, product_id, zone_id, available_delta, reserved_delta, event_timestamp, absolute_available=None):
-        curr_avail, curr_res, last_updated_at = self._get_inventory(product_id, zone_id)
-        
-        if last_updated_at and event_timestamp <= last_updated_at:
-            logging.info(f"Skipping update for product {product_id} in zone {zone_id} due to older timestamp {event_timestamp} <= {last_updated_at}")
-            return
+    def _ensure_newer_event(self, current_timestamp, incoming_timestamp, product_id, zone_id):
+        if current_timestamp is not None and incoming_timestamp <= current_timestamp:
+            logging.info(
+                "ignored stale event product_id=%s zone_id=%s incoming_timestamp=%s current_timestamp=%s",
+                product_id,
+                zone_id,
+                incoming_timestamp.isoformat(),
+                current_timestamp.isoformat(),
+            )
+            return False
+        return True
+
+    def _queue_inventory_snapshot(self, batch, product_id, zone_id, available_quantity, reserved_quantity, event_timestamp):
+        batch.add(
+            SimpleStatement(
+                """
+                UPDATE inventory_by_product_zone
+                SET available_quantity = %s, reserved_quantity = %s, last_event_timestamp = %s
+                WHERE product_id = %s AND zone_id = %s
+                """
+            ),
+            (available_quantity, reserved_quantity, event_timestamp, product_id, zone_id),
+        )
+        batch.add(
+            SimpleStatement(
+                """
+                UPDATE inventory_by_product
+                SET available_quantity = %s, reserved_quantity = %s, last_event_timestamp = %s
+                WHERE product_id = %s AND zone_id = %s
+                """
+            ),
+            (available_quantity, reserved_quantity, event_timestamp, product_id, zone_id),
+        )
+        batch.add(
+            SimpleStatement(
+                """
+                UPDATE inventory_by_zone
+                SET available_quantity = %s, reserved_quantity = %s, last_event_timestamp = %s
+                WHERE zone_id = %s AND product_id = %s
+                """
+            ),
+            (available_quantity, reserved_quantity, event_timestamp, zone_id, product_id),
+        )
+
+    def _apply_inventory_delta(self, batch, product_id, zone_id, event_timestamp, available_delta=0, reserved_delta=0, absolute_available=None):
+        current = self._load_inventory_state(product_id, zone_id)
+        if not self._ensure_newer_event(current["last_event_timestamp"], event_timestamp, product_id, zone_id):
+            return False
+
+        available_quantity = current["available_quantity"]
+        reserved_quantity = current["reserved_quantity"]
 
         if absolute_available is not None:
-            new_avail = absolute_available
-            new_res = curr_res
+            available_quantity = absolute_available
         else:
-            new_avail = curr_avail + available_delta
-            new_res = curr_res + reserved_delta
+            available_quantity += available_delta
+        reserved_quantity += reserved_delta
 
-        update_query = """
-            UPDATE inventory_by_product_zone 
-            SET available_quantity = %s, reserved_quantity = %s, last_updated_at = %s
-            WHERE product_id = %s AND zone_id = %s
-        """
-        batch.add(SimpleStatement(update_query), (new_avail, new_res, event_timestamp, product_id, zone_id))
+        if available_quantity < 0:
+            raise EventValidationError(
+                f"negative available quantity for product_id={product_id} zone_id={zone_id}"
+            )
+        if reserved_quantity < 0:
+            raise EventValidationError(
+                f"negative reserved quantity for product_id={product_id} zone_id={zone_id}"
+            )
 
-        update_query_prod = """
-            UPDATE inventory_by_product 
-            SET available_quantity = %s, reserved_quantity = %s, last_updated_at = %s
-            WHERE product_id = %s AND zone_id = %s
-        """
-        batch.add(SimpleStatement(update_query_prod), (new_avail, new_res, event_timestamp, product_id, zone_id))
+        self._queue_inventory_snapshot(
+            batch,
+            product_id,
+            zone_id,
+            available_quantity,
+            reserved_quantity,
+            event_timestamp,
+        )
+        return True
 
-        update_query_zone = """
-            UPDATE inventory_by_zone 
-            SET available_quantity = %s, reserved_quantity = %s, last_updated_at = %s
-            WHERE zone_id = %s AND product_id = %s
-        """
-        batch.add(SimpleStatement(update_query_zone), (new_avail, new_res, event_timestamp, zone_id, product_id))
+    def _append_event_history(self, batch, event_type, event_timestamp, event_id, payload):
+        product_ids = []
+        if "product_id" in payload:
+            product_ids.append(self._parse_uuid(payload["product_id"], "product_id"))
+        for item in payload.get("items", []):
+            product_ids.append(self._parse_uuid(item["product_id"], "product_id"))
+        unique_product_ids = list(dict.fromkeys(product_ids))
+        for product_id in unique_product_ids:
+            batch.add(
+                SimpleStatement(
+                    """
+                    INSERT INTO event_history (product_id, event_timestamp, event_id, event_type, payload)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """
+                ),
+                (product_id, event_timestamp, event_id, event_type, json.dumps(payload, sort_keys=True)),
+            )
 
-    def process_event(self, event):
-        event_id = uuid.UUID(event['event_id'])
-        event_type = event['event_type']
-        payload = event['payload']
-        
-        event_timestamp_str = event.get('timestamp', datetime.utcnow().isoformat())
-        if event_timestamp_str.endswith('Z'):
-            event_timestamp_str = event_timestamp_str[:-1] + '+00:00'
-        event_timestamp = datetime.fromisoformat(event_timestamp_str)
-        event_timestamp = event_timestamp.replace(tzinfo=None)
+    def _build_batch(self, event, partition, offset):
+        event_id = self._parse_uuid(event.get("event_id"), "event_id")
+        event_type = event.get("event_type")
+        payload = event.get("payload")
+        event_timestamp = self._parse_timestamp(event.get("timestamp"))
 
-        if self._is_event_processed(event_id):
-            logging.info(f"Event {event_id} already processed, skipping.")
-            return
+        if not event_type:
+            raise EventValidationError("event_type is required")
+        if not isinstance(payload, dict):
+            raise EventValidationError("payload must be an object")
 
-        if 'quantity' in payload and payload['quantity'] < 0:
-            raise ValueError(f"Invalid quantity: {payload['quantity']} (must be positive)")
-        if 'items' in payload:
-            for item in payload['items']:
-                if item.get('quantity', 0) < 0:
-                    raise ValueError(f"Invalid quantity in items: {item['quantity']} (must be positive)")
+        batch = BatchStatement(consistency_level=ConsistencyLevel.QUORUM)
+        mutated = False
 
-        batch = BatchStatement(consistency_level=ConsistencyLevel.ONE)
+        if event_type == "PRODUCT_RECEIVED":
+            quantity = payload.get("quantity")
+            self._validate_positive_quantity(quantity)
+            mutated = self._apply_inventory_delta(
+                batch,
+                self._parse_uuid(payload.get("product_id"), "product_id"),
+                self._parse_uuid(payload.get("zone_id"), "zone_id"),
+                event_timestamp,
+                available_delta=quantity,
+            )
+        elif event_type == "PRODUCT_SHIPPED":
+            quantity = payload.get("quantity")
+            self._validate_positive_quantity(quantity)
+            mutated = self._apply_inventory_delta(
+                batch,
+                self._parse_uuid(payload.get("product_id"), "product_id"),
+                self._parse_uuid(payload.get("zone_id"), "zone_id"),
+                event_timestamp,
+                available_delta=-quantity,
+            )
+        elif event_type == "PRODUCT_MOVED":
+            quantity = payload.get("quantity")
+            self._validate_positive_quantity(quantity)
+            product_id = self._parse_uuid(payload.get("product_id"), "product_id")
+            from_zone_id = self._parse_uuid(payload.get("from_zone_id"), "from_zone_id")
+            to_zone_id = self._parse_uuid(payload.get("to_zone_id"), "to_zone_id")
+            left = self._apply_inventory_delta(
+                batch,
+                product_id,
+                from_zone_id,
+                event_timestamp,
+                available_delta=-quantity,
+            )
+            right = self._apply_inventory_delta(
+                batch,
+                product_id,
+                to_zone_id,
+                event_timestamp,
+                available_delta=quantity,
+            )
+            mutated = left or right
+        elif event_type == "PRODUCT_RESERVED":
+            quantity = payload.get("quantity")
+            self._validate_positive_quantity(quantity)
+            mutated = self._apply_inventory_delta(
+                batch,
+                self._parse_uuid(payload.get("product_id"), "product_id"),
+                self._parse_uuid(payload.get("zone_id"), "zone_id"),
+                event_timestamp,
+                available_delta=-quantity,
+                reserved_delta=quantity,
+            )
+        elif event_type == "PRODUCT_RELEASED":
+            quantity = payload.get("quantity")
+            self._validate_positive_quantity(quantity)
+            mutated = self._apply_inventory_delta(
+                batch,
+                self._parse_uuid(payload.get("product_id"), "product_id"),
+                self._parse_uuid(payload.get("zone_id"), "zone_id"),
+                event_timestamp,
+                available_delta=quantity,
+                reserved_delta=-quantity,
+            )
+        elif event_type == "INVENTORY_COUNTED":
+            counted_quantity = payload.get("counted_quantity")
+            self._validate_positive_quantity(counted_quantity, "counted_quantity")
+            mutated = self._apply_inventory_delta(
+                batch,
+                self._parse_uuid(payload.get("product_id"), "product_id"),
+                self._parse_uuid(payload.get("zone_id"), "zone_id"),
+                event_timestamp,
+                absolute_available=counted_quantity,
+            )
+        elif event_type == "ORDER_CREATED":
+            order_id = self._parse_uuid(payload.get("order_id"), "order_id")
+            items = payload.get("items")
+            if not isinstance(items, list) or not items:
+                raise EventValidationError("items must be a non-empty array")
+            batch.add(
+                SimpleStatement(
+                    """
+                    UPDATE orders
+                    SET status = %s, last_event_timestamp = %s
+                    WHERE order_id = %s
+                    """
+                ),
+                ("CREATED", event_timestamp, order_id),
+            )
+            mutated = True
+            for item in items:
+                quantity = item.get("quantity")
+                self._validate_positive_quantity(quantity)
+                changed = self._apply_inventory_delta(
+                    batch,
+                    self._parse_uuid(item.get("product_id"), "product_id"),
+                    self._parse_uuid(item.get("zone_id"), "zone_id"),
+                    event_timestamp,
+                    available_delta=-quantity,
+                    reserved_delta=quantity,
+                )
+                mutated = mutated or changed
+        elif event_type == "ORDER_COMPLETED":
+            order_id = self._parse_uuid(payload.get("order_id"), "order_id")
+            items = payload.get("items")
+            if not isinstance(items, list) or not items:
+                raise EventValidationError("items must be a non-empty array")
+            batch.add(
+                SimpleStatement(
+                    """
+                    UPDATE orders
+                    SET status = %s, last_event_timestamp = %s
+                    WHERE order_id = %s
+                    """
+                ),
+                ("COMPLETED", event_timestamp, order_id),
+            )
+            mutated = True
+            for item in items:
+                quantity = item.get("quantity")
+                self._validate_positive_quantity(quantity)
+                changed = self._apply_inventory_delta(
+                    batch,
+                    self._parse_uuid(item.get("product_id"), "product_id"),
+                    self._parse_uuid(item.get("zone_id"), "zone_id"),
+                    event_timestamp,
+                    reserved_delta=-quantity,
+                )
+                mutated = mutated or changed
+        else:
+            raise UnsupportedEventError(f"unsupported event_type: {event_type}")
 
-        if event_type == 'PRODUCT_RECEIVED':
-            self._add_inventory_updates_to_batch(batch, uuid.UUID(payload['product_id']), uuid.UUID(payload['zone_id']), payload['quantity'], 0, event_timestamp)
-        
-        elif event_type == 'PRODUCT_SHIPPED':
-            self._add_inventory_updates_to_batch(batch, uuid.UUID(payload['product_id']), uuid.UUID(payload['zone_id']), -payload['quantity'], 0, event_timestamp)
-            
-        elif event_type == 'PRODUCT_MOVED':
-            self._add_inventory_updates_to_batch(batch, uuid.UUID(payload['product_id']), uuid.UUID(payload['from_zone_id']), -payload['quantity'], 0, event_timestamp)
-            self._add_inventory_updates_to_batch(batch, uuid.UUID(payload['product_id']), uuid.UUID(payload['to_zone_id']), payload['quantity'], 0, event_timestamp)
-            
-        elif event_type == 'PRODUCT_RESERVED':
-            self._add_inventory_updates_to_batch(batch, uuid.UUID(payload['product_id']), uuid.UUID(payload['zone_id']), -payload['quantity'], payload['quantity'], event_timestamp)
-            
-        elif event_type == 'PRODUCT_RELEASED':
-            self._add_inventory_updates_to_batch(batch, uuid.UUID(payload['product_id']), uuid.UUID(payload['zone_id']), payload['quantity'], -payload['quantity'], event_timestamp)
-            
-        elif event_type == 'INVENTORY_COUNTED':
-            self._add_inventory_updates_to_batch(batch, uuid.UUID(payload['product_id']), uuid.UUID(payload['zone_id']), 0, 0, event_timestamp, absolute_available=payload['counted_quantity'])
-            
-        elif event_type == 'ORDER_CREATED':
-            batch.add(SimpleStatement("INSERT INTO orders (order_id, status) VALUES (%s, %s)"), (uuid.UUID(payload['order_id']), 'CREATED'))
-            for item in payload['items']:
-                self._add_inventory_updates_to_batch(batch, uuid.UUID(item['product_id']), uuid.UUID(item['zone_id']), -item['quantity'], item['quantity'], event_timestamp)
-                
-        elif event_type == 'ORDER_COMPLETED':
-            batch.add(SimpleStatement("UPDATE orders SET status = %s WHERE order_id = %s"), ('COMPLETED', uuid.UUID(payload['order_id'])))
-            for item in payload['items']:
-                self._add_inventory_updates_to_batch(batch, uuid.UUID(item['product_id']), uuid.UUID(item['zone_id']), 0, -item['quantity'], event_timestamp)
+        self._append_event_history(batch, event_type, event_timestamp, event_id, payload)
+        batch.add(
+            SimpleStatement(
+                """
+                INSERT INTO processed_events (event_id, processed_at, event_type, partition, offset)
+                VALUES (%s, toTimestamp(now()), %s, %s, %s)
+                """
+            ),
+            (event_id, event_type, partition, offset),
+        )
+        return event_id, event_type, batch, mutated
 
-        batch.add(SimpleStatement("INSERT INTO processed_events (event_id, processed_at) VALUES (%s, toTimestamp(now()))"), (event_id,))
-        
-        self.session.execute(batch)
-
-    def send_to_dlq(self, event, error_reason, error_code, msg):
-        dlq_msg = {
-            "original_event": event,
+    def send_to_dlq(self, raw_event, error_reason, error_code, msg):
+        payload = {
+            "original_event": raw_event,
             "error_reason": error_reason,
             "error_code": error_code,
-            "failed_at": datetime.utcnow().isoformat() + "Z",
+            "failed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "kafka_metadata": {
                 "partition": msg.partition(),
-                "offset": msg.offset()
-            }
+                "offset": msg.offset(),
+            },
         }
-        self.dlq_producer.produce(
-            'warehouse-events-dlq',
-            value=json.dumps(dlq_msg).encode('utf-8')
-        )
-        self.dlq_producer.poll(0)
+        self.dlq_producer.produce(self.dlq_topic, value=json.dumps(payload).encode("utf-8"))
+        self.dlq_producer.flush()
 
     def run(self):
+        schema_registry_url = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")
+        from confluent_kafka.schema_registry import SchemaRegistryClient
+        from confluent_kafka.schema_registry.avro import AvroDeserializer
+        from confluent_kafka.serialization import SerializationContext, MessageField
+        
+        schema_registry_client = SchemaRegistryClient({'url': schema_registry_url})
+        
+        with open('schemas/warehouse_event.avsc', 'r') as f:
+            schema_str = f.read()
+            
+        avro_deserializer = AvroDeserializer(schema_registry_client, schema_str)
+
         try:
             while True:
                 msg = self.consumer.poll(1.0)
                 if msg is None:
                     continue
                 if msg.error():
-                    logging.error(f"Consumer error: {msg.error()}")
+                    logging.error("consumer error=%s", msg.error())
                     continue
 
+                raw_event = None
                 try:
-                    event = json.loads(msg.value().decode('utf-8'))
-                    self.process_event(event)
-                    self.consumer.commit(msg)
-                    logging.info(f"Processed event_id: {event['event_id']}, event_type: {event['event_type']}, offset: {msg.offset()}, partition: {msg.partition()}")
-                except ValueError as e:
-                    logging.error(f"Validation error processing message: {e}. Sending to DLQ.")
-                    self.send_to_dlq(event, str(e), "VALIDATION_ERROR", msg)
-                    self.consumer.commit(msg)
-                except Exception as e:
-                    logging.error(f"Error processing message: {e}. Sending to DLQ.")
-                    self.send_to_dlq(event, str(e), "INTERNAL_ERROR", msg)
-                    self.consumer.commit(msg)
+                    raw_event = avro_deserializer(msg.value(), SerializationContext(msg.topic(), MessageField.VALUE))
+                    
+                    if isinstance(raw_event.get("payload"), str):
+                        raw_event["payload"] = json.loads(raw_event["payload"])
+                        
+                    event_id = self._parse_uuid(raw_event.get("event_id"), "event_id")
+                    if self._is_event_processed(event_id):
+                        self.consumer.commit(message=msg)
+                        logging.info(
+                            "duplicate event skipped event_id=%s event_type=%s offset=%s partition=%s",
+                            event_id,
+                            raw_event.get("event_type"),
+                            msg.offset(),
+                            msg.partition(),
+                        )
+                        continue
+
+                    processed_event_id, event_type, batch, mutated = self._build_batch(
+                        raw_event,
+                        msg.partition(),
+                        msg.offset(),
+                    )
+                    self.session.execute(batch)
+                    self.consumer.commit(message=msg)
+                    logging.info(
+                        "processed event_id=%s event_type=%s offset=%s partition=%s mutated=%s",
+                        processed_event_id,
+                        event_type,
+                        msg.offset(),
+                        msg.partition(),
+                        mutated,
+                    )
+                except (EventValidationError, UnsupportedEventError, json.JSONDecodeError) as error:
+                    logging.error(
+                        "message sent to dlq offset=%s partition=%s reason=%s",
+                        msg.offset(),
+                        msg.partition(),
+                        error,
+                    )
+                    self.send_to_dlq(raw_event if raw_event is not None else str(msg.value()), str(error), "VALIDATION_ERROR", msg)
+                    self.consumer.commit(message=msg)
+                except Exception as error:
+                    logging.exception("unexpected processing error offset=%s partition=%s", msg.offset(), msg.partition())
+                    self.send_to_dlq(raw_event if raw_event is not None else str(msg.value()), str(error), "INTERNAL_ERROR", msg)
+                    self.consumer.commit(message=msg)
         finally:
             self.consumer.close()
-            self.dlq_producer.flush()
             self.cluster.shutdown()
 
-if __name__ == '__main__':
-    consumer = WarehouseConsumer()
-    consumer.run()
+
+if __name__ == "__main__":
+    WarehouseConsumer().run()
