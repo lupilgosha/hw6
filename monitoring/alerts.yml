@@ -1,0 +1,43 @@
+groups:
+  - name: warehouse-consumer
+    rules:
+      - alert: ConsumerHighErrorRate
+        expr: |
+          rate(warehouse_events_processed_total{status=~"validation_error|internal_error"}[5m])
+          / rate(warehouse_events_processed_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate in warehouse consumer"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+
+      - alert: ConsumerDLQSpike
+        expr: rate(warehouse_dlq_sent_total[5m]) > 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DLQ spike detected"
+          description: "More than 1 event/s sent to DLQ: {{ $value }}"
+
+      - alert: ConsumerSlowProcessing
+        expr: |
+          histogram_quantile(0.95, rate(warehouse_event_processing_duration_seconds_bucket[5m])) > 2
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer p95 latency is high"
+          description: "p95 processing time is {{ $value }}s"
+
+  - name: kafka
+    rules:
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumergroup_lag > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer lag is high"
+          description: "Consumer group lag is {{ $value }} messages"

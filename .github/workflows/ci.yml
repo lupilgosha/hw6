@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build:
+    name: Build Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build consumer image
+        run: docker build -f Dockerfile.consumer -t warehouse-consumer .
+      - name: Build producer image
+        run: docker build -f Dockerfile.producer -t warehouse-producer .
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run unit tests
+        run: pytest tests/test_consumer_unit.py -v
+
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start services
+        run: docker compose up -d --wait --wait-timeout 120 || docker compose up -d
+      - name: Wait for consumer to be ready
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && break
+            sleep 5
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run integration tests
+        env:
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+          SCHEMA_REGISTRY_URL: http://localhost:8081
+          CASSANDRA_CONTACT_POINTS: localhost
+          WAREHOUSE_TOPIC: warehouse-events
+        run: pytest tests/test_integration.py -v
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  e2e-tests:
+    name: E2E tests
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start services
+        run: docker compose up -d --wait --wait-timeout 120 || docker compose up -d
+      - name: Wait for consumer to be ready
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && break
+            sleep 5
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run E2E tests
+        env:
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+          SCHEMA_REGISTRY_URL: http://localhost:8081
+          CASSANDRA_CONTACT_POINTS: localhost
+          CONSUMER_API_URL: http://localhost:8000
+          WAREHOUSE_TOPIC: warehouse-events
+        run: pytest tests/test_e2e.py -v
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  load-tests:
+    name: Load tests
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start services
+        run: docker compose up -d --wait --wait-timeout 120 || docker compose up -d
+      - name: Wait for consumer to be ready
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && break
+            sleep 5
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run load tests
+        run: |
+          locust -f tests/locustfile.py \
+            --headless \
+            --users 10 \
+            --spawn-rate 2 \
+            --run-time 30s \
+            --host http://localhost:8000 \
+            --exit-code-on-error 1 \
+            --html load-test-report.html
+      - name: Upload load test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-report
+          path: load-test-report.html
+      - name: Health check after load
+        run: curl -sf http://localhost:8000/health
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

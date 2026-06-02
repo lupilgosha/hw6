@@ -2,3 +2,7 @@ confluent-kafka==2.3.0
 cassandra-driver==3.29.0
 requests==2.31.0
 fastavro==1.9.3
+prometheus-client==0.20.0
+pytest==8.1.1
+pytest-mock==3.14.0
+locust==2.24.0

@@ -39,6 +39,11 @@ services:
     environment:
       CASSANDRA_CLUSTER_NAME: warehouse-cluster
       CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
 
   kafka-init:
     image: confluentinc/cp-kafka:7.3.0
@@ -52,14 +57,15 @@ services:
       '
 
   consumer:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
     depends_on:
       - kafka-init
       - cassandra
       - schema-registry
-    working_dir: /app
-    volumes:
-      - ./:/app
+    ports:
+      - "8000:8000"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
@@ -68,26 +74,58 @@ services:
       WAREHOUSE_TOPIC: warehouse-events
       WAREHOUSE_DLQ_TOPIC: warehouse-events-dlq
       WAREHOUSE_CONSUMER_GROUP: warehouse-state-consumer
-    command: >
-      bash -c '
-        pip install --no-cache-dir -r requirements.txt &&
-        python consumer.py
-      '
+      METRICS_PORT: 8000
 
   wms-producer:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
     depends_on:
       - kafka-init
       - schema-registry
-    working_dir: /app
-    volumes:
-      - ./:/app
+    ports:
+      - "8001:8001"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
       WAREHOUSE_TOPIC: warehouse-events
-    command: >
-      bash -c '
-        pip install --no-cache-dir -r requirements.txt &&
-        python wms_producer.py
-      '
+      METRICS_PORT: 8001
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    depends_on:
+      - kafka
+    ports:
+      - "9308:9308"
+    command:
+      - "--kafka.server=kafka:29092"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    depends_on:
+      - consumer
+      - wms-producer
+      - kafka-exporter
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus

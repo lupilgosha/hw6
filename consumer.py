@@ -4,14 +4,96 @@ import os
 import time
 import uuid
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+from urllib.parse import parse_qs, urlparse
 
 from cassandra import ConsistencyLevel
 from cassandra.cluster import Cluster, NoHostAvailable
 from cassandra.query import BatchStatement, SimpleStatement
 from confluent_kafka import Consumer, Producer
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+_consumer_instance = None
+
+
+class ConsumerHTTPHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/metrics":
+            output = generate_latest()
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.end_headers()
+            self.wfile.write(output)
+        elif parsed.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        elif parsed.path == "/inventory":
+            qs = parse_qs(parsed.query)
+            product_id = qs.get("product_id", [None])[0]
+            zone_id = qs.get("zone_id", [None])[0]
+            if not product_id or not zone_id:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"product_id and zone_id are required"}')
+                return
+            try:
+                row = _consumer_instance.session.execute(
+                    "SELECT available_quantity, reserved_quantity FROM inventory_by_product_zone WHERE product_id = %s AND zone_id = %s",
+                    (uuid.UUID(product_id), uuid.UUID(zone_id)),
+                ).one()
+                if row is None:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"not found"}')
+                    return
+                body = json.dumps({
+                    "product_id": product_id,
+                    "zone_id": zone_id,
+                    "available_quantity": row.available_quantity,
+                    "reserved_quantity": row.reserved_quantity,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(exc)}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+KAFKA_REQUESTS_TOTAL = Counter(
+    "kafka_requests_total",
+    "Total number of Kafka messages processed",
+    ["method", "endpoint", "status"],
+)
+KAFKA_REQUEST_ERRORS_TOTAL = Counter(
+    "kafka_request_errors_total",
+    "Total number of Kafka processing errors",
+    ["method", "endpoint", "error_type"],
+)
+KAFKA_REQUEST_DURATION_SECONDS = Histogram(
+    "kafka_request_duration_seconds",
+    "Time spent processing a Kafka message",
+    ["method", "endpoint"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
 
 
 class EventValidationError(Exception):
@@ -446,17 +528,29 @@ class WarehouseConsumer:
         self.dlq_producer.flush()
 
     def run(self):
+        global _consumer_instance
+        _consumer_instance = self
+
         schema_registry_url = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")
+        metrics_port = int(os.getenv("METRICS_PORT", "8000"))
+
+        server = HTTPServer(("0.0.0.0", metrics_port), ConsumerHTTPHandler)
+        Thread(target=server.serve_forever, daemon=True).start()
+        logging.info("http server started on port %s", metrics_port)
+
         from confluent_kafka.schema_registry import SchemaRegistryClient
         from confluent_kafka.schema_registry.avro import AvroDeserializer
         from confluent_kafka.serialization import SerializationContext, MessageField
-        
-        schema_registry_client = SchemaRegistryClient({'url': schema_registry_url})
-        
-        with open('schemas/warehouse_event.avsc', 'r') as f:
+
+        schema_registry_client = SchemaRegistryClient({"url": schema_registry_url})
+
+        with open("schemas/warehouse_event.avsc", "r") as f:
             schema_str = f.read()
-            
+
         avro_deserializer = AvroDeserializer(schema_registry_client, schema_str)
+
+        endpoint = "warehouse-events"
+        method = "consume"
 
         try:
             while True:
@@ -468,31 +562,38 @@ class WarehouseConsumer:
                     continue
 
                 raw_event = None
+                event_type = "UNKNOWN"
                 try:
                     raw_event = avro_deserializer(msg.value(), SerializationContext(msg.topic(), MessageField.VALUE))
-                    
+
                     if isinstance(raw_event.get("payload"), str):
                         raw_event["payload"] = json.loads(raw_event["payload"])
-                        
+
+                    event_type = raw_event.get("event_type", "UNKNOWN")
                     event_id = self._parse_uuid(raw_event.get("event_id"), "event_id")
+
                     if self._is_event_processed(event_id):
                         self.consumer.commit(message=msg)
                         logging.info(
                             "duplicate event skipped event_id=%s event_type=%s offset=%s partition=%s",
                             event_id,
-                            raw_event.get("event_type"),
+                            event_type,
                             msg.offset(),
                             msg.partition(),
                         )
+                        KAFKA_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status="duplicate").inc()
                         continue
 
-                    processed_event_id, event_type, batch, mutated = self._build_batch(
-                        raw_event,
-                        msg.partition(),
-                        msg.offset(),
-                    )
-                    self.session.execute(batch)
+                    with KAFKA_REQUEST_DURATION_SECONDS.labels(method=method, endpoint=endpoint).time():
+                        processed_event_id, event_type, batch, mutated = self._build_batch(
+                            raw_event,
+                            msg.partition(),
+                            msg.offset(),
+                        )
+                        self.session.execute(batch)
+
                     self.consumer.commit(message=msg)
+                    KAFKA_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status="success").inc()
                     logging.info(
                         "processed event_id=%s event_type=%s offset=%s partition=%s mutated=%s",
                         processed_event_id,
@@ -508,10 +609,14 @@ class WarehouseConsumer:
                         msg.partition(),
                         error,
                     )
+                    KAFKA_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status="error").inc()
+                    KAFKA_REQUEST_ERRORS_TOTAL.labels(method=method, endpoint=endpoint, error_type="validation_error").inc()
                     self.send_to_dlq(raw_event if raw_event is not None else str(msg.value()), str(error), "VALIDATION_ERROR", msg)
                     self.consumer.commit(message=msg)
                 except Exception as error:
                     logging.exception("unexpected processing error offset=%s partition=%s", msg.offset(), msg.partition())
+                    KAFKA_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status="error").inc()
+                    KAFKA_REQUEST_ERRORS_TOTAL.labels(method=method, endpoint=endpoint, error_type="internal_error").inc()
                     self.send_to_dlq(raw_event if raw_event is not None else str(msg.value()), str(error), "INTERNAL_ERROR", msg)
                     self.consumer.commit(message=msg)
         finally:
