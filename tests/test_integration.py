@@ -6,7 +6,7 @@ import json
 import os
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 from cassandra.cluster import Cluster
@@ -44,7 +44,7 @@ def send_event(producer, serializer, event_type, payload):
     event = {
         "event_id": str(uuid.uuid4()),
         "event_type": event_type,
-        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "payload": json.dumps(payload, sort_keys=True),
     }
     key = payload.get("product_id", event["event_id"])

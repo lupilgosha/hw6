@@ -16,7 +16,7 @@ import json
 import os
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 import requests
@@ -56,7 +56,7 @@ def test_full_warehouse_scenario(cassandra_session):
     event = {
         "event_id": str(uuid.uuid4()),
         "event_type": "PRODUCT_RECEIVED",
-        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "payload": json.dumps({"product_id": product_id, "zone_id": zone_id, "quantity": quantity}, sort_keys=True),
     }
     producer.produce(
