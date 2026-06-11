@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from urllib.parse import parse_qs, urlparse
@@ -231,8 +231,8 @@ class WarehouseConsumer:
         except ValueError as error:
             raise EventValidationError(f"invalid timestamp: {value}") from error
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=UTC)
-        return parsed.astimezone(UTC).replace(tzinfo=None)
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
     def _validate_positive_quantity(self, quantity, field_name="quantity"):
         if not isinstance(quantity, int) or quantity <= 0:
@@ -518,7 +518,7 @@ class WarehouseConsumer:
             "original_event": raw_event,
             "error_reason": error_reason,
             "error_code": error_code,
-            "failed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "failed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "kafka_metadata": {
                 "partition": msg.partition(),
                 "offset": msg.offset(),

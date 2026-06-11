@@ -1,21 +1,23 @@
+import os
+import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from consumer import EventValidationError, UnsupportedEventError, WarehouseConsumer
 
 
 @pytest.fixture
 def consumer():
-    with (
-        patch("consumer.Cluster"),
-        patch("consumer.Consumer"),
-        patch("consumer.Producer"),
-        patch("consumer.HTTPServer"),
-        patch("consumer.Thread"),
-    ):
+    with patch("consumer.Cluster"), \
+         patch("consumer.Consumer"), \
+         patch("consumer.Producer"), \
+         patch("consumer.HTTPServer"), \
+         patch("consumer.Thread"):
         c = WarehouseConsumer.__new__(WarehouseConsumer)
         c.topic = "warehouse-events"
         c.dlq_topic = "warehouse-events-dlq"
@@ -32,7 +34,7 @@ def make_event(event_type, payload):
     return {
         "event_id": str(uuid.uuid4()),
         "event_type": event_type,
-        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "payload": payload,
     }
 
