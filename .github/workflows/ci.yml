@@ -38,11 +38,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Start services
-        run: docker compose up -d --wait --wait-timeout 120 || docker compose up -d
+        run: docker compose up -d
+      - name: Wait for Kafka
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 && break
+            sleep 5
+          done
       - name: Wait for Schema Registry
         run: |
           for i in $(seq 1 30); do
             curl -sf http://localhost:8081/subjects && break
+            sleep 5
+          done
+      - name: Wait for Cassandra
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' && break
             sleep 5
           done
       - name: Wait for consumer to be ready
@@ -74,11 +86,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Start services
-        run: docker compose up -d --wait --wait-timeout 120 || docker compose up -d
+        run: docker compose up -d
+      - name: Wait for Kafka
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 && break
+            sleep 5
+          done
       - name: Wait for Schema Registry
         run: |
           for i in $(seq 1 30); do
             curl -sf http://localhost:8081/subjects && break
+            sleep 5
+          done
+      - name: Wait for Cassandra
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' && break
             sleep 5
           done
       - name: Wait for consumer to be ready
@@ -111,7 +135,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Start services
-        run: docker compose up -d --wait --wait-timeout 120 || docker compose up -d
+        run: docker compose up -d
+      - name: Wait for Kafka
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 && break
+            sleep 5
+          done
+      - name: Wait for Schema Registry
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8081/subjects && break
+            sleep 5
+          done
+      - name: Wait for Cassandra
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' && break
+            sleep 5
+          done
       - name: Wait for consumer to be ready
         run: |
           for i in $(seq 1 30); do
