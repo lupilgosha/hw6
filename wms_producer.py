@@ -100,6 +100,18 @@ def produce_event(producer, topic, serializer, event):
         raise
 
 
+def _connect_schema_registry(schema_registry_url):
+    while True:
+        try:
+            client = SchemaRegistryClient({"url": schema_registry_url})
+            with open("schemas/warehouse_event.avsc", "r", encoding="utf-8") as schema_file:
+                schema = schema_file.read()
+            return AvroSerializer(client, schema)
+        except Exception:
+            logging.info("waiting for schema registry to become available")
+            time.sleep(5)
+
+
 def main():
     kafka_bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
     schema_registry_url = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")
@@ -108,11 +120,7 @@ def main():
 
     start_metrics_server(metrics_port)
 
-    schema_registry_client = SchemaRegistryClient({"url": schema_registry_url})
-    with open("schemas/warehouse_event.avsc", "r", encoding="utf-8") as schema_file:
-        schema = schema_file.read()
-
-    serializer = AvroSerializer(schema_registry_client, schema)
+    serializer = _connect_schema_registry(schema_registry_url)
     producer = Producer({"bootstrap.servers": kafka_bootstrap})
 
     product_id = str(uuid.uuid4())
