@@ -1,10 +1,10 @@
-# Текст защиты hw7
+# Текст защиты hw6
 
 ---
 
 ## 1. Вступление
 
-«Я реализовал hw7 на базе hw6 — event-driven системы управления складом.
+«Я реализовал hw6 — event-driven систему управления складом.
 Система состоит из двух сервисов: WMS Producer и Consumer, брокера Kafka со Schema Registry,
 базы данных Cassandra, а также мониторинга на Prometheus и Grafana.
 Сейчас я покажу E2E демонстрацию: подниму систему, запущу CI, покажу тесты и метрики.»
@@ -16,7 +16,7 @@
 «Начнём. Поднимаю всю инфраструктуру одной командой:»
 
 ```bash
-cd ~/hw7
+cd ~/hw6
 docker compose up -d
 ```
 
@@ -39,14 +39,32 @@ for i in $(seq 1 40); do curl -sf http://localhost:8000/health && echo " ready" 
 «Consumer и producer уже отдают метрики. Проверим:»
 
 ```bash
-curl -s http://localhost:8000/metrics | grep kafka_requests_total
+curl -s http://localhost:8000/metrics | grep -E "kafka_requests_total|kafka_request_errors_total|kafka_request_duration_seconds"
 ```
 
-«Видим три метрики: kafka_requests_total, kafka_request_errors_total, kafka_request_duration_seconds —
-с labels method, endpoint, status. Это ровно то, что требует задание.»
+«Разберём вывод. Видим три кастомные метрики (плюс стандартные метрики Python от prometheus_client — GC, process memory, CPU):
+
+1. `kafka_requests_total{endpoint="warehouse-events",method="consume",status="success"} 3.0` —
+   Counter обработанных сообщений Kafka. Label `status=success/error` позволяет считать error rate.
+   Здесь 3 успешных и 1 с ошибкой — error rate = 25%.
+
+2. `kafka_request_errors_total{error_type="validation_error",...} 1.0` —
+   Counter ошибок с разбивкой по `error_type`. Можно отслеживать validation_error, internal_error и т.д.
+
+3. `kafka_request_duration_seconds_bucket{le="0.005",...} 1.0` — Histogram времени обработки сообщения.
+   Видим bucket-ы: 1 сообщение обработалось быстрее 5мс, 3 — быстрее 25мс, все 4 — быстрее 250мс.
+   Prometheus сам вычисляет квантили (p50, p95, p99) через histogram_quantile.
+
+Все три метрики с labels method, endpoint, status/error_type — это аналог http_requests_total для event-driven систем.
+Ровно то, что требует задание (Counter, Counter, Histogram с нужными labels).»
+
+То же самое на producer:
+```bash
+curl -s http://localhost:8001/metrics | grep -E "kafka_requests_total|kafka_request_errors_total|kafka_request_duration_seconds"
+```
 
 ```bash
-curl -s http://localhost:8001/metrics | grep kafka_requests_total
+curl -s http://localhost:8001/metrics | grep -E "kafka_requests_total|kafka_request_errors_total|kafka_request_duration_seconds"
 ```
 
 ---
@@ -55,13 +73,14 @@ curl -s http://localhost:8001/metrics | grep kafka_requests_total
 
 «Открываем Prometheus: http://localhost:9090»
 
-«Проверим, что все таргеты UP:»
+«Проверим состояние таргетов:»
 
 ```bash
 curl -s "http://localhost:9090/api/v1/targets" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(t['labels']['job'], t['health']) for t in d['data']['activeTargets']]"
 ```
 
-«Видим три таргета: warehouse-consumer, warehouse-producer, kafka-exporter — все up.»
+«Видим три таргета: warehouse-consumer, warehouse-producer, kafka-exporter.
+Состояние — UP — значит Prometheus успешно скрейпит метрики с сервисов.»
 
 «Запросим метрику в Prometheus:»
 
@@ -94,7 +113,7 @@ curl -s "http://localhost:3000/api/search" -u admin:admin | python3 -c "import s
 «Запускаю unit-тесты. Они не требуют docker — тестируют бизнес-логику consumer в изоляции через моки:»
 
 ```bash
-cd ~/hw7
+cd ~/hw6
 python3 -m pytest tests/test_consumer_unit.py -v
 ```
 
@@ -180,7 +199,7 @@ build → unit-tests → integration-tests → e2e-tests → load-tests
 «Покажу конфиг:»
 
 ```bash
-cat ~/hw7/.github/workflows/ci.yml
+cat ~/hw6/.github/workflows/ci.yml
 ```
 
 ---

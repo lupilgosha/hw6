@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 
@@ -119,7 +119,7 @@ def main():
     zone_a = str(uuid.uuid4())
     zone_b = str(uuid.uuid4())
     order_id = str(uuid.uuid4())
-    started_at = datetime.now(UTC)
+    started_at = datetime.now(timezone.utc)
 
     events = [
         build_event("PRODUCT_RECEIVED", started_at, {"product_id": product_id, "zone_id": zone_a, "quantity": 100}),
