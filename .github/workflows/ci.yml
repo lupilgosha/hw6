@@ -39,8 +39,10 @@ jobs:
       COMPOSE_PROJECT_NAME: warehouse
     steps:
       - uses: actions/checkout@v4
-      - name: Clean up old containers
-        run: docker ps -aq | xargs -r docker rm -f || true
+      - name: Clean up Docker environment
+        run: |
+          docker ps -aq | xargs -r docker rm -f || true
+          docker network prune -f || true
       - name: Start services
         run: docker compose up -d
       - name: Wait for all services
@@ -99,8 +101,10 @@ jobs:
       COMPOSE_PROJECT_NAME: warehouse
     steps:
       - uses: actions/checkout@v4
-      - name: Clean up old containers
-        run: docker ps -aq | xargs -r docker rm -f || true
+      - name: Clean up Docker environment
+        run: |
+          docker ps -aq | xargs -r docker rm -f || true
+          docker network prune -f || true
       - name: Start services
         run: docker compose up -d
       - name: Wait for all services
@@ -160,8 +164,10 @@ jobs:
       COMPOSE_PROJECT_NAME: warehouse
     steps:
       - uses: actions/checkout@v4
-      - name: Clean up old containers
-        run: docker ps -aq | xargs -r docker rm -f || true
+      - name: Clean up Docker environment
+        run: |
+          docker ps -aq | xargs -r docker rm -f || true
+          docker network prune -f || true
       - name: Start services
         run: docker compose up -d
       - name: Wait for all services
