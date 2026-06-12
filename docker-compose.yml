@@ -4,7 +4,7 @@ networks:
 
 services:
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.3.0
+    image: confluentinc/cp-zookeeper:7.6.1
     networks:
       - warehouse-net
     environment:
@@ -12,7 +12,7 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
 
   kafka:
-    image: confluentinc/cp-kafka:7.3.0
+    image: confluentinc/cp-kafka:7.6.1
     networks:
       - warehouse-net
     depends_on:
@@ -30,7 +30,7 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
   schema-registry:
-    image: confluentinc/cp-schema-registry:7.3.0
+    image: confluentinc/cp-schema-registry:7.6.1
     networks:
       - warehouse-net
     depends_on:
@@ -63,7 +63,7 @@ services:
       retries: 10
 
   kafka-init:
-    image: confluentinc/cp-kafka:7.3.0
+    image: confluentinc/cp-kafka:7.6.1
     networks:
       - warehouse-net
     depends_on:
