@@ -76,7 +76,15 @@ jobs:
           done
       - name: Show container status
         if: always()
-        run: docker compose ps && docker compose logs kafka --tail=20 && docker compose logs schema-registry --tail=20
+        run: |
+          echo "=== docker compose ps -a ==="
+          docker compose ps -a
+          echo "=== kafka logs ==="
+          docker compose logs kafka --tail=30
+          echo "=== zookeeper logs ==="
+          docker compose logs zookeeper --tail=10
+          echo "=== schema-registry logs ==="
+          docker compose logs schema-registry --tail=20
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
