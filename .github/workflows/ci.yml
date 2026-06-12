@@ -35,12 +35,14 @@ jobs:
     name: Integration tests
     runs-on: ubuntu-latest
     needs: unit-tests
+    env:
+      COMPOSE_PROJECT_NAME: warehouse
     steps:
       - uses: actions/checkout@v4
+      - name: Clean up old containers
+        run: docker ps -aq | xargs -r docker rm -f || true
       - name: Start services
-        run: |
-          docker compose down -v --remove-orphans 2>/dev/null || true
-          docker compose up -d
+        run: docker compose up -d
       - name: Wait for all services
         run: |
           echo "Waiting for Kafka (port 9092)..."
@@ -93,12 +95,14 @@ jobs:
     name: E2E tests
     runs-on: ubuntu-latest
     needs: integration-tests
+    env:
+      COMPOSE_PROJECT_NAME: warehouse
     steps:
       - uses: actions/checkout@v4
+      - name: Clean up old containers
+        run: docker ps -aq | xargs -r docker rm -f || true
       - name: Start services
-        run: |
-          docker compose down -v --remove-orphans 2>/dev/null || true
-          docker compose up -d
+        run: docker compose up -d
       - name: Wait for all services
         run: |
           echo "Waiting for Kafka (port 9092)..."
@@ -152,12 +156,14 @@ jobs:
     name: Load tests
     runs-on: ubuntu-latest
     needs: e2e-tests
+    env:
+      COMPOSE_PROJECT_NAME: warehouse
     steps:
       - uses: actions/checkout@v4
+      - name: Clean up old containers
+        run: docker ps -aq | xargs -r docker rm -f || true
       - name: Start services
-        run: |
-          docker compose down -v --remove-orphans 2>/dev/null || true
-          docker compose up -d
+        run: docker compose up -d
       - name: Wait for all services
         run: |
           echo "Waiting for Kafka (port 9092)..."
