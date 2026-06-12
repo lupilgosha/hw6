@@ -41,9 +41,9 @@ jobs:
         run: docker compose up -d
       - name: Wait for all services
         run: |
-          echo "Waiting for Kafka..."
+          echo "Waiting for Kafka (port 9092)..."
           for i in $(seq 1 40); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server kafka:29092 2>/dev/null && echo "Kafka ready" && break
+            nc -z localhost 9092 2>/dev/null && echo "Kafka port ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
@@ -55,7 +55,7 @@ jobs:
           done
           echo "Waiting for Cassandra..."
           for i in $(seq 1 40); do
-            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' 2>/dev/null && echo "Cassandra ready" && break
+            nc -z localhost 9042 2>/dev/null && echo "Cassandra port ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
@@ -97,9 +97,9 @@ jobs:
         run: docker compose up -d
       - name: Wait for all services
         run: |
-          echo "Waiting for Kafka..."
+          echo "Waiting for Kafka (port 9092)..."
           for i in $(seq 1 40); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server kafka:29092 2>/dev/null && echo "Kafka ready" && break
+            nc -z localhost 9092 2>/dev/null && echo "Kafka port ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
@@ -111,7 +111,7 @@ jobs:
           done
           echo "Waiting for Cassandra..."
           for i in $(seq 1 40); do
-            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' 2>/dev/null && echo "Cassandra ready" && break
+            nc -z localhost 9042 2>/dev/null && echo "Cassandra port ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
@@ -154,9 +154,9 @@ jobs:
         run: docker compose up -d
       - name: Wait for all services
         run: |
-          echo "Waiting for Kafka..."
+          echo "Waiting for Kafka (port 9092)..."
           for i in $(seq 1 40); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server kafka:29092 2>/dev/null && echo "Kafka ready" && break
+            nc -z localhost 9092 2>/dev/null && echo "Kafka port ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
@@ -168,7 +168,7 @@ jobs:
           done
           echo "Waiting for Cassandra..."
           for i in $(seq 1 40); do
-            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' 2>/dev/null && echo "Cassandra ready" && break
+            nc -z localhost 9042 2>/dev/null && echo "Cassandra port ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
