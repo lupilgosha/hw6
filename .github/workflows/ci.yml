@@ -43,7 +43,7 @@ jobs:
         run: |
           echo "Waiting for Kafka..."
           for i in $(seq 1 40); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 2>/dev/null && echo "Kafka ready" && break
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server kafka:29092 2>/dev/null && echo "Kafka ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
@@ -67,7 +67,7 @@ jobs:
           done
       - name: Show container status
         if: always()
-        run: docker compose ps && docker compose logs --tail=30
+        run: docker compose ps && docker compose logs kafka --tail=20 && docker compose logs schema-registry --tail=20
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -99,7 +99,7 @@ jobs:
         run: |
           echo "Waiting for Kafka..."
           for i in $(seq 1 40); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 2>/dev/null && echo "Kafka ready" && break
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server kafka:29092 2>/dev/null && echo "Kafka ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
@@ -123,7 +123,7 @@ jobs:
           done
       - name: Show container status
         if: always()
-        run: docker compose ps && docker compose logs --tail=30
+        run: docker compose ps && docker compose logs kafka --tail=20 && docker compose logs schema-registry --tail=20
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -156,7 +156,7 @@ jobs:
         run: |
           echo "Waiting for Kafka..."
           for i in $(seq 1 40); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 2>/dev/null && echo "Kafka ready" && break
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server kafka:29092 2>/dev/null && echo "Kafka ready" && break
             echo "  attempt $i/40..."
             sleep 5
           done
