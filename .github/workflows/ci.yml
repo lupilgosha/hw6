@@ -39,30 +39,35 @@ jobs:
       - uses: actions/checkout@v4
       - name: Start services
         run: docker compose up -d
-      - name: Wait for Kafka
+      - name: Wait for all services
         run: |
-          for i in $(seq 1 30); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 && break
+          echo "Waiting for Kafka..."
+          for i in $(seq 1 40); do
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 2>/dev/null && echo "Kafka ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for Schema Registry
-        run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8081/subjects && break
+          echo "Waiting for Schema Registry..."
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8081/subjects 2>/dev/null && echo "Schema Registry ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for Cassandra
-        run: |
-          for i in $(seq 1 30); do
-            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' && break
+          echo "Waiting for Cassandra..."
+          for i in $(seq 1 40); do
+            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' 2>/dev/null && echo "Cassandra ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for consumer to be ready
-        run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8000/health && break
+          echo "Waiting for consumer..."
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8000/health 2>/dev/null && echo "Consumer ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
+      - name: Show container status
+        if: always()
+        run: docker compose ps && docker compose logs --tail=30
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -75,6 +80,9 @@ jobs:
           CASSANDRA_CONTACT_POINTS: localhost
           WAREHOUSE_TOPIC: warehouse-events
         run: pytest tests/test_integration.py -v
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --tail=50
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -87,30 +95,35 @@ jobs:
       - uses: actions/checkout@v4
       - name: Start services
         run: docker compose up -d
-      - name: Wait for Kafka
+      - name: Wait for all services
         run: |
-          for i in $(seq 1 30); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 && break
+          echo "Waiting for Kafka..."
+          for i in $(seq 1 40); do
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 2>/dev/null && echo "Kafka ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for Schema Registry
-        run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8081/subjects && break
+          echo "Waiting for Schema Registry..."
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8081/subjects 2>/dev/null && echo "Schema Registry ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for Cassandra
-        run: |
-          for i in $(seq 1 30); do
-            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' && break
+          echo "Waiting for Cassandra..."
+          for i in $(seq 1 40); do
+            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' 2>/dev/null && echo "Cassandra ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for consumer to be ready
-        run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8000/health && break
+          echo "Waiting for consumer..."
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8000/health 2>/dev/null && echo "Consumer ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
+      - name: Show container status
+        if: always()
+        run: docker compose ps && docker compose logs --tail=30
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -124,6 +137,9 @@ jobs:
           CONSUMER_API_URL: http://localhost:8000
           WAREHOUSE_TOPIC: warehouse-events
         run: pytest tests/test_e2e.py -v
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --tail=50
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -136,28 +152,30 @@ jobs:
       - uses: actions/checkout@v4
       - name: Start services
         run: docker compose up -d
-      - name: Wait for Kafka
+      - name: Wait for all services
         run: |
-          for i in $(seq 1 30); do
-            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 && break
+          echo "Waiting for Kafka..."
+          for i in $(seq 1 40); do
+            docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:29092 2>/dev/null && echo "Kafka ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for Schema Registry
-        run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8081/subjects && break
+          echo "Waiting for Schema Registry..."
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8081/subjects 2>/dev/null && echo "Schema Registry ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for Cassandra
-        run: |
-          for i in $(seq 1 30); do
-            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' && break
+          echo "Waiting for Cassandra..."
+          for i in $(seq 1 40); do
+            docker compose exec -T cassandra cqlsh -e 'describe keyspaces' 2>/dev/null && echo "Cassandra ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
-      - name: Wait for consumer to be ready
-        run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8000/health && break
+          echo "Waiting for consumer..."
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8000/health 2>/dev/null && echo "Consumer ready" && break
+            echo "  attempt $i/40..."
             sleep 5
           done
       - uses: actions/setup-python@v5

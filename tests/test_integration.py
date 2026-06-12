@@ -22,21 +22,41 @@ TOPIC = os.getenv("WAREHOUSE_TOPIC", "warehouse-events")
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "..", "schemas", "warehouse_event.avsc")
 
 
+def _wait_for(description, fn, timeout=120):
+    deadline = time.time() + timeout
+    last_error = None
+    while time.time() < deadline:
+        try:
+            return fn()
+        except Exception as exc:
+            last_error = exc
+            time.sleep(2)
+    raise RuntimeError(f"{description} not available within {timeout}s: {last_error}")
+
+
 @pytest.fixture(scope="module")
 def cassandra_session():
-    cluster = Cluster([CASSANDRA_HOST])
-    session = cluster.connect("warehouse")
+    def _connect():
+        cluster = Cluster([CASSANDRA_HOST])
+        session = cluster.connect("warehouse")
+        return cluster, session
+
+    cluster, session = _wait_for("Cassandra", _connect)
     yield session
     cluster.shutdown()
 
 
 @pytest.fixture(scope="module")
 def avro_producer():
-    src = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
-    with open(SCHEMA_PATH) as f:
-        schema_str = f.read()
-    ser = AvroSerializer(src, schema_str)
-    p = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+    def _connect():
+        src = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
+        with open(SCHEMA_PATH) as f:
+            schema_str = f.read()
+        ser = AvroSerializer(src, schema_str)
+        p = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+        return p, ser
+
+    p, ser = _wait_for("Schema Registry", _connect)
     return p, ser
 
 
